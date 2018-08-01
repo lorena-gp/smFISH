@@ -1,0 +1,223 @@
+---
+title: "Functions"
+author: "Lorena Garcia-Perez (lorena.garcia-perez@crick.ac.uk)"
+date: "`r format(Sys.time(), '%d %B, %Y, %H:%M')`"
+
+output:
+  html_notebook: default
+
+knit: (function(inputFile, encoding) { 
+      out_dir <- "docs";
+      rmarkdown::render(inputFile,
+                        encoding = encoding, 
+                        output_file = file.path(dirname(inputFile),
+                                      out_dir, "func.html")) })
+---
+  
+  
+Trancription probability  
+  
+```{r}
+prob.TX.fn <- function(data, day.chosen, gene.chosen, ploidy) {
+  # day.chosen and gene.schosen must be input as character (for example, "4"
+  # and "Olig2")
+  # ploidy must be input as numeric
+  day.gene.TX.subset <-
+    pull(filter(data, day == day.chosen & channel == gene.chosen), TX.number)
+  return(sum(day.gene.TX.subset)/(ploidy*length(day.gene.TX.subset)))
+}
+```
+  
+Mean RNA copy number  
+  
+```{r}
+mean.copy.fn <- function(data, day.chosen, gene.chosen) {
+  # day.chosen and gene.schosen must be input as character (for example, "4"
+  # and "Olig2")
+  day.gene.copy.subset <-
+    pull(filter(data, day == day.chosen & channel == gene.chosen), copy)
+  return(mean(day.gene.copy.subset))
+}
+```
+  
+Mean number of RNA pol = mean number of molecules at TX spot  
+  
+```{r}
+mean.nPol.fn <- function(data, day.chosen, gene.chosen) {
+  # day.chosen and gene.schosen must be input as character (for example, "4"
+  # and "Olig2")
+  day.gene.nPol.subset <-
+    pull(filter(data, day == day.chosen & channel == gene.chosen), TX.mol)
+  return(mean(day.gene.nPol.subset))
+}
+```
+  
+Chose white or dark themes as part of the plotting funtion inputs  
+  
+```{r}
+basicTheme <-list(
+  theme(plot.title = element_text(size = 15, hjust = 0.5, face = "bold",
+                                  margin = margin(t = 0, r = 0, b = 30, l = 0)),
+        axis.text = element_text(size = 15),
+        axis.title = element_text(size = 15),
+        axis.title.x =
+          element_text(margin = margin(t = 20, r = 0, b = 0, l = 0)),
+        axis.title.y =
+          element_text(margin = margin(t = 0, r = 20, b = 0, l = 0)),
+        axis.line = element_line(size = 1.5),
+        axis.ticks = element_line(size = 1.5),
+        axis.ticks.length = unit(0.15,"cm"),
+        strip.text.x = element_text(size = 15, face = "bold"),
+        panel.spacing = unit(1, "lines"),
+        panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent", colour = NA),
+        legend.background = element_rect(fill = "transparent"),
+        legend.box.background = element_rect(fill = "transparent"))
+)
+
+whiteTheme <- list(theme())
+
+darkTheme <- list(
+  theme(axis.text = element_text(colour = "lightgrey"),
+        axis.title = element_text(colour = "lightgrey"),
+        axis.line = element_line(colour = "lightgrey"),
+        axis.ticks = element_line(colour = "lightgrey"),
+        strip.text.x = element_text(colour = "lightgrey"))
+)
+```
+  
+  
+RNA copy number and RNA concentration (== density) plots  
+  
+1. Box plots  
+  
+```{r}
+copy.box.plot <-
+  function(data, Theme = whiteTheme) {
+    data$day <- as.factor(data$day)
+    levels(data$day) <- days.names
+    plots <-
+      ggplot(data, aes(day, copy, group=day)) +
+        geom_boxplot(outlier.shape = NA, fill = NA,
+                     colour = cbbPalette[2], lwd = 1) +
+        geom_quasirandom(shape = 21, fill = "lightgrey", colour = "black",
+                         size = 0.75, alpha = 0.4) +
+        ylab("RNAs per cell") +
+        xlab("") +
+        ylim(0, max(data$copy)) +
+        labs (title = "RNA copy number") +
+        theme_classic() +
+        basicTheme +
+        Theme +
+        theme(plot.title=element_text(colour = cbbPalette[2]),
+              strip.background = element_rect(fill = cbbPalette[2],
+                                              colour = cbbPalette[2])) +
+        facet_wrap(~ channel)
+    ggsave(paste("./figures/copy_box_plot_",
+                 deparse(substitute(Theme)), ".pdf", sep=""),
+           plots, width = 10, height = 5)
+    print(plots)
+  }
+
+concentration.box.plot <-
+  function(data, Theme = whiteTheme) {
+    data$day <- as.factor(data$day)
+    levels(data$day) <- days.names
+    plots <-
+      ggplot(data, aes(day, density, group=day)) +
+      geom_boxplot(outlier.shape = NA, fill = NA,
+                   colour = cbbPalette[3], lwd = 1) +
+      geom_quasirandom(shape = 21, fill = "lightgrey", colour = "black",
+                       size = 0.75, alpha = 0.4) +
+      ylab(bquote("RNAs/" ~  mu*m^2)) +
+      xlab("") +
+      ylim(0, max(data$density)) +
+      labs (title = "RNA concentration") +
+      theme_classic() +
+      basicTheme +
+      Theme +
+      theme(plot.title=element_text(colour = cbbPalette[3]),
+            strip.background = element_rect(fill = cbbPalette[3],
+                                            colour = cbbPalette[3])) +
+      facet_wrap(~ channel)
+    ggsave(paste("./figures/concentration_box_plot_",
+                 deparse(substitute(Theme)), ".pdf", sep=""),
+           plots, width = 10, height = 5)
+    print(plots)
+  }
+
+```
+  
+  
+2. Scatter and density contours plots:  
+  
+channel.1 and channel.2 must be supplied as strings  
+data must have channel as factor  
+  
+```{r}
+copy.pairwise.scatter.plot <-
+  # Could try to make axis limit specific for pair of genes being plot each time
+  function(data, channel.1, channel.2, Theme = whiteTheme) {
+    data.subset <-
+      data %>%
+      select(channel, day, image, cell.id, cell.area, copy) %>%
+      spread(channel, copy)
+    plots <-
+      ggplot(data.subset, aes_string(channel.2, channel.1)) +
+        geom_point(shape = 21, fill = "lightgrey", colour = "black",
+                   size = 1.5, alpha = 0.4) +
+        geom_density_2d(size = 0.5, colour = cbbPalette[2], bins = 10) +
+        labs (title = "RNA copy number") +
+        scale_x_continuous(name = bquote(.(channel.2) ~ " RNAs per cell"),
+                           breaks = seq(0, max(data$copy), 50),
+                           limits = c(0, max(data$copy))) +
+        scale_y_continuous(name = bquote(.(channel.1) ~ " RNAs per cell"),
+                           breaks = seq(0, max(data$copy), 50),
+                           limits = c(0, max(data$copy))) +
+        theme_classic() +
+        basicTheme +
+        Theme +
+        theme(plot.title=element_text(colour = cbbPalette[2]),
+              strip.background = element_rect(fill = cbbPalette[2],
+                                              colour = cbbPalette[2])) +
+        facet_wrap(~ day)
+    ggsave(paste("./figures/copy_pairwise_scatter_plot_",
+                 deparse(substitute(Theme)),"_",
+                 channel.2,"_",channel.1, ".pdf", sep=""),
+           plots, width = 10, height = 5)
+    print(plots)
+  }
+
+concentration.pairwise.scatter.plot <-
+  # Could try to make axis limit specific for pair of genes being plot each time
+    function(data, channel.1, channel.2, Theme = whiteTheme) {
+    data.subset <-
+      data %>%
+      select(channel, day, image, cell.id, cell.area, density) %>%
+      spread(channel, density)
+    plots <-
+      ggplot(data.subset, aes_string(channel.2, channel.1)) +
+      geom_point(shape = 21, fill = "lightgrey", colour = "black",
+                 size = 1.5, alpha = 0.4) +
+      geom_density_2d(size = 0.5, colour = cbbPalette[3], bins = 10) +
+      labs (title = "RNA cconcentration") +
+      scale_x_continuous(name = bquote(.(channel.2) ~ " RNAs/" ~  mu*m^2),
+                         breaks = seq(0, max(data$density), 2),
+                         limits = c(0, max(data$density))) +
+      scale_y_continuous(name = bquote(.(channel.1) ~ " RNAs/" ~  mu*m^2),
+                         breaks = seq(0, max(data$density), 2),
+                         limits = c(0, max(data$density))) +
+      theme_classic() +
+      basicTheme +
+      Theme +
+      theme(plot.title=element_text(colour = cbbPalette[3]),
+            strip.background = element_rect(fill = cbbPalette[3],
+                                            colour = cbbPalette[3])) +
+      facet_wrap(~ day)
+    ggsave(paste("./figures/concentration_pairwise_scatter_plot_",
+                 deparse(substitute(Theme)),"_",
+                 channel.2,"_",channel.1,".pdf", sep=""),
+           plots, width = 10, height = 5)
+    print(plots)
+  }
+```
