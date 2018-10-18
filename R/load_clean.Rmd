@@ -2,34 +2,14 @@
 title: "Load and clean data"
 author: "Lorena Garcia-Perez (lorena.garcia-perez@crick.ac.uk)"
 date: "`r format(Sys.time(), '%d %B, %Y, %H:%M')`"
-
-output:
-  html_notebook
-  
-
-knit: (function(inputFile, encoding) { 
-      out_dir <- "docs";
-      rmarkdown::render(inputFile,
-                        encoding = encoding, 
-                        output_file = file.path(dirname(inputFile),
-                                     out_dir, "load_clean.html")) })
 ---
-  
-  
-Another option is to execute the following:
-args = c("Diff26_c2_data.csv",
-         "26_c2_copy_den_plots.pdf", "26_c2_TX_plots.pdf", "26_c2_heter_plots.pdf",
-         "26_c2_copyN.csv", "26_c2_TX.csv", "26_c2_heter.csv")
-#  
-#The first argument is the data to be read,  
-#arguments 2-4 are the names of the pdf files to be created containing the plots,  
-#arguments 5-7 are the names of the csv files to be created cotaining the extracted data  
   
 ```{r}
 wd <- getwd()
 setwd("..")
 parent <- getwd()
 
+# Based on the output .csv table obtained with the Python script
 file <- read.csv("./input/Diff26_c2_data.csv")
 
 setwd(wd)
@@ -41,35 +21,49 @@ pander(head(file), style = "rmarkdown")
   
 ```{r}
 # Colors
-cbbPalette <- c("#000000", "#009E73", "#e79f00", "#9ad0f3", "#0072B2", "#D55E00", 
-                "#CC79A7", "#F0E442")
 
-days <- c(4,5,6)
+# colourPalette <- c(
+#  "#000000", "#009E73", "#e79f00", "#9ad0f3", "#0072B2", "#D55E00",
+#  "#CC79A7", "#F0E442"
+# )
+
+# colourPalette <- lacroix_palette("PeachPear", type = "discrete")
+
+gg_color_hue <- function(n) {
+  hues <- seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+cols <- gg_color_hue(3)
+col.custom <- c(cols[3], cols[2], cols[1])
+
+days <- c(4, 5, 6)
 days.names <- c("day 4", "day 5", "day 6")
 
 channels <- c(0, 1, 2)
-genes <- c("Irx3","Sox2","Olig2")
+genes <- c("Irx3", "Sox2", "Olig2")
 
 progenitors.gene <- genes[2]
 
 # For spot selection as TX spot
-MaxInt.alpha <- 2 # This value should lay between 1.5 to 3
+MaxI.alpha <- 2 # This value should lay between 1.5 to 3
 area.alpha <- 2 # This value should lay between 1.5 to 3
 
-  
 # With 60X objective in BX61 microscope and previous ANDOR camera:
 # Pixel size = 0.1107x0.1107 µm^2 = 0.01225 µm^2
-pixel.size <- 0.01225
+# pixel.size <- 0.01225 # µm^2 !!!!
+pixel.size <- 0.2734^2 # µm^2. MAYBE THIS WAS TEH CORRECT ONE FOR BEFORE?
 
+Z.dimensions <- 6 # um, from -3 to 3
 
 ploidy <- 3
 
-#Correction factor that takes into account
-#probe localization over gene:
-#Irx3 reverse starnd transcribed, Sox2 and Olig2
+# Correction factor that takes into account
+# probe localization over gene:
+# Irx3 reverse starnd transcribed, Sox2 and Olig2
 correction.factor <- c(0.34, 0.5, 0.34)
 
-
 genes.length <- c(4822, 3311, 4400) # channel 0, 1, 2 (Irx3, Sox2, Olig2)
-vPol.chosen = 2040 # bp/min, as in Bahar Halpern
+vPol.chosen <- 2040 # bp/min, as in Bahar Halpern
 ```
+

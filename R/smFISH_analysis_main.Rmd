@@ -2,10 +2,16 @@
 title: "smFISH analysis"
 author: "Lorena Garcia-Perez (lorena.garcia-perez@crick.ac.uk)"
 date: "`r format(Sys.time(), '%d %B, %Y, %H:%M')`"
+geometry: margin = 2 cm
 
 output:
+  
   pdf_document:
     latex_engine: xelatex
+    highlight: haddock
+    toc: true
+    
+#“default”, “tango”, “pygments”, “kate”, “monochrome”, “espresso”, “zenburn”, “haddock”
 
 knit: (function(inputFile, encoding) { 
       out_dir <- "docs";
@@ -15,63 +21,104 @@ knit: (function(inputFile, encoding) {
                                       out_dir, "smFISH_analysis.pdf")) })
 ---
 
-Main R script to determine:
-    RNA copy number per cell
-    RNA density number per cell
-    Transcriptional properties
-Based on the output .csv table obtained with the Python script  
-  
-Load libraries  
+# Set up:
+
+## Load libraries  
   
 ```{r, message = FALSE, warning = FALSE}
 library(ggplot2)
-library (ggbeeswarm)
-require(plyr) # Am I using this in the end?
+library(ggbeeswarm)
+require(plyr) # I use it for mapValues in pairwise.scatter custom function
 library(tidyverse)
 # library(tibble) #for add_column etc
 library(knitr)
 library(rmarkdown)
 library(pander)
-```
-  
-```{r}
-opts_chunk$set(panderOptions('table.split.table', 80),
-               panderOptions('table.alignment.default', 'left'),
-               panderOptions('table.alignment.rownames', 'right'))
+library(jsonlite)
+library(gridExtra)
+library(LaCroixColoR)
 
+library(viridis)
+
+#Rstudio addins > style active file (uses the styler package)
 ```
-  
-Read data and calculate RNA copy number and concentration (== density)  
+
+## Global output doc settings
+
+```{r}
+opts_chunk$set(
+  panderOptions("table.split.table", 120),
+  fig.align = "center",
+  fig.width = 7
+)
+# options(dplyr.print_min = 6, dplyr.print_max = 6)
+```
+
+# Import file that loads data and contains user-defined parameters
   
 ```{r child = "load_clean.Rmd"}
 render("load_clean.Rmd")
 ```
+
+# Import file with custom functions
   
+```{r child = "func.Rmd"}
+render("func.Rmd")
+```
+
+# RNA copies, concentration and transcription per cell
+
+## RNA copy number and concentration
+
 ```{r}
-copy.density.cell <-
+
+# detach("package:plyr", unload=TRUE)
+
+copy.density.cell.nonZero <-
   file %>%
-  mutate(cell.area = cell.area * pixel.size) %>%
-    # Convert cell area in pixels to cell area in µm^2
+  mutate(cell.area = cell.area * pixel.size) %>% # Convert cell area in pixels to cell area in µm^2
+  filter(spot.id != 0) %>%
   group_by(channel, day, image, cell.id, cell.area) %>%
   summarise(copy = n()) %>% # RNA copy number per cell
-  mutate(density = round(copy / cell.area, 3))
-    # RNA densities in terms of RNA molecules per µm^2
+  mutate(density = round(copy / cell.area, 3)) # RNA densities in terms of RNA molecules per µm^2
+
+copy.density.cell.Zero <-
+  file %>%
+  mutate(cell.area = cell.area * pixel.size) %>% # Convert cell area in pixels to cell area in µm^2
+  filter(spot.id == 0) %>%
+  group_by(channel, day, image, cell.id, cell.area) %>%
+  summarise(copy = 0) %>% # RNA copy number per cell
+  mutate(density = round(copy / cell.area, 3)) # RNA densities in terms of RNA molecules per µm^2
+
+copy.density.cell <- full_join(copy.density.cell.nonZero, copy.density.cell.Zero)
+
+copy.density.cell <-
+  copy.density.cell %>%
+  mutate(cell.volume = cell.area * Z.dimensions) %>%
+  mutate(density.volume = copy / cell.volume)
+
 pander(head(copy.density.cell), style = "rmarkdown")
 ```
   
-To determine which spots can be considered transcription spots,
-we need to know the area and maximum intensity values for all the spots
-we normalize according to each channel, day and image  
+## Transcriptional parameters
+
+To determine which spots can be considered transcription spots, we need to know 
+the area and maximum intensity values for all the spots. Then we normalize
+according to each channel, day and image  
   
 ```{r}
 TX.threholds <-
   file %>%
   group_by(channel, day, image) %>%
-    # Choose threholds specifically for each image and channel
-  summarise(MaxInt.median = median(max.int), MaxInt.mad = mad(max.int),
-            area.median = median(area), area.mad = mad(area)) %>%
-  mutate(MaxInt.thres = MaxInt.median + 3 * MaxInt.alpha * MaxInt.mad,
-         area.thres = area.median + 3 * area.alpha * area.mad)
+  # Choose threholds specifically for each image and channel
+  summarise(
+    MaxI.median = median(max.int), MaxI.mad = mad(max.int),
+    area.median = median(area), area.mad = mad(area)
+  ) %>%
+  mutate(
+    MaxI.thres = MaxI.median + 3 * MaxI.alpha * MaxI.mad,
+    area.thres = area.median + 3 * area.alpha * area.mad
+  )
 pander(head(TX.threholds), style = "rmarkdown")
 ```
   
@@ -80,140 +127,226 @@ TX.number.cell <-
   file %>%
   group_by(channel, day, image) %>%
   left_join(TX.threholds) %>%
-  mutate(is.TX.spot = max.int > MaxInt.thres & area > area.thres) %>%
+  mutate(is.TX.spot = max.int > MaxI.thres & area > area.thres) %>%
   group_by(channel, day, image, cell.id) %>%
   summarise(TX.number = sum(is.TX.spot))
 pander(head(TX.number.cell), style = "rmarkdown")
-
 ```
-  
+
+To estimate how many RNA molecules are within each TX spot, we take into account
+the mean intensity and area of each TX spot, and divide by the median values of
+all the spots in the same channel, day and image. A correction factor that takes
+into account probe location along the RNA is also applied.
+
 ```{r}
 TX.mol <-
   file %>%
   group_by(channel, day, image) %>%
   left_join(TX.threholds) %>%
-  mutate(is.TX.spot = max.int > MaxInt.thres & area > area.thres) %>%
+  mutate(is.TX.spot = max.int > MaxI.thres & area > area.thres) %>%
   mutate(meanInt.median = median(mean.int)) %>%
   filter(is.TX.spot == TRUE) %>%
   mutate(probe.loc = channel) %>%
   mutate(probe.loc = as.numeric(recode(probe.loc,
-                            "0"=correction.factor[1],
-                            "1"=correction.factor[2],
-                            "2"=correction.factor[3]))) %>%
+    "0" = correction.factor[1],
+    "1" = correction.factor[2],
+    "2" = correction.factor[3]
+  ))) %>%
   mutate(TX.mol = mean.int * area / (probe.loc * meanInt.median * area.median))
 TX.mol$channel <- as.factor(TX.mol$channel)
 levels(TX.mol$channel) <- genes
 pander(head(TX.mol), style = "rmarkdown")
 ```
   
-  
-### 2. Main datasets for single cell data:  
-  
+# Joining datasets and subsetting cell population
+
+## All cells
+
 ```{r}
 single.cell.data <-
   inner_join(copy.density.cell, TX.number.cell) %>%
   ungroup()
 single.cell.data$channel <- as.factor(single.cell.data$channel)
 levels(single.cell.data$channel) <- genes
+
+setwd(parent)
+write.csv(single.cell.data, "./ouput/single_cell_data.csv", row.names = FALSE)
+setwd(wd)
+
 pander(head(single.cell.data), style = "rmarkdown")
 ```
-  
+
 ```{r}
-single.cell.expressing.data <-
+single.cell.data.nested <-
   single.cell.data %>%
-  filter(density >= 1)
-pander(head(single.cell.expressing.data), style = "rmarkdown")
+  group_by(day, image, cell.id, cell.area, channel) %>%
+  nest() %>%
+  group_by(day, image, cell.id, cell.area) %>%
+  nest() %>%
+  group_by(day) %>%
+  nest()
+
+myjson <- toJSON(single.cell.data.nested, pretty = TRUE, auto_unbox = TRUE)
+
+setwd(parent)
+write(myjson, "./ouput/single_cell_data_with_TX.json")
+setwd(wd)
+
+# json_data <- fromJSON(file = "./ouput/single_cell_data_with_TX.json")
 ```
-  
-```{r}
-single.cell.sox2.expressing.data <-
-  # This could be combined within single.cell.progenitors.data with filter_if()?
-  single.cell.data %>%
-  filter(channel == progenitors.gene) %>%
-  filter(density >= 1) # Require sox2 density >= 1 molecule / µm^2
-pander(head(single.cell.sox2.expressing.data), style = "rmarkdown")
-```
-  
-```{r}
-single.cell.progenitors.data <-
-  # Select progenitors according to sox2 density >= 1 molecule / µm^2
-  semi_join(single.cell.data, single.cell.sox2.expressing.data,
-            by = c("day", "image", "cell.id", "cell.area"))
-pander(head(single.cell.progenitors.data), style = "rmarkdown")
-```
-  
+
 ```{r}
 # This is the more complete, non subseted, dataset
 # But, if a cell has two TX spots, it will appear on two rows and so on
-withTX.single.cell.data <- 
+withTXmol.single.cell.data <-
   TX.mol %>%
-  select (channel, day, image, cell.id, spot.id, TX.mol) %>% 
+  select(channel, day, image, cell.id, spot.id, TX.mol) %>%
   full_join(single.cell.data) %>%
-  arrange(channel, day, image, cell.id) %>%
+  rename(spot.id.TX = spot.id) %>%
+  arrange(channel, day, image) %>%
   replace_na(list(TX.mol = 0))
-pander(head(withTX.single.cell.data), style = "rmarkdown")
+pander(head(withTXmol.single.cell.data), style = "rmarkdown")
 ```
-  
+
 ```{r}
 two.alleles.data <-
   TX.mol %>%
   select(channel, day, image, cell.id, TX.mol) %>%
   group_by(channel, day, image, cell.id) %>%
-  mutate(freq = n()) %>% 
+  mutate(freq = n()) %>%
   ungroup() %>%
   filter(freq == 2) %>%
   select(-freq) %>%
-  mutate(TX.id = rep(c(1,2), length.out = length(.$channel))) %>%
-    # Create a column with appropiate number of rows
+  mutate(TX.id = rep(c(1, 2), length.out = length(.$channel))) %>%
+  # Create a column with appropiate number of rows
   spread(TX.id, TX.mol) %>%
   rename(TX.id.1 = "1", TX.id.2 = "2")
-two.alleles.data$channel <- as.factor(two.alleles.data$channel )
+two.alleles.data$channel <- as.factor(two.alleles.data$channel)
 levels(two.alleles.data$channel) <- genes
 pander(head(two.alleles.data), style = "rmarkdown")
 ```
   
+## Cells expressing certain genes
+
+
+single.cell.expressing.data <-
+  single.cell.data %>%
+  filter(density >= 1)
+pander(head(single.cell.expressing.data), style = "rmarkdown")
+
+
+
+single.cell.sox2.expressing.data <-
+  # This could be combined within single.cell.progenitors.data with filter_if()?
+  single.cell.data %>%
+    filter(channel == progenitors.gene) %>%
+    filter(density >= 1) # Require sox2 density >= 1 molecule / µm^2
+pander(head(single.cell.sox2.expressing.data), style = "rmarkdown")
+
+
+## Neural progenitor cells
+
+This dataset will be used for posterior analysis
+
+
+single.cell.progenitors.data <-
+  # Select progenitors according to sox2 density >= 1 molecule / µm^2
+  semi_join(single.cell.data, single.cell.sox2.expressing.data,
+    by = c("day", "image", "cell.id", "cell.area")
+  )
+pander(head(single.cell.progenitors.data), style = "rmarkdown")
+
   
-### Mean properties  
-  
-single.cell.progenitors.data is used, but results with single.cell.data are
-quite similar  
-  
-```{r child = "func.Rmd"}
-render("func.Rmd")
+
+
+# Plotting RNA copy number and concentration for progenitor cells
+
+```{r}
+genes.pairwise <-
+  tibble(genes) %>%
+  rename(gene.1 = genes) %>%
+  mutate(gene.2 = gene.1) %>%
+  expand(gene.1, gene.2) %>%
+  filter(gene.1 < gene.2) %>% # To get unique combinations
+  mutate(gene.3 = c(genes[2], genes[3], genes[1]))
+```
+
+```{r}
+# opts_knit$set(root.dir = parent)
+setwd(parent)
+
+box.plot.area.volume(
+  single.cell.data
+  # ,"white",darkTheme
+)
+
+# copy and concentration box plots
+box.plots(
+  single.cell.data
+  # ,"white",darkTheme
+)
 ```
   
 ```{r}
+
+setwd(parent)
+
+for (g in c(1, 2, 3)) {
+  pairwise.scatter.plot(
+    single.cell.data,
+    genes.pairwise$gene.1[g], genes.pairwise$gene.2[g],
+    genes.pairwise$gene.3[g]
+    # , darkTheme
+  )
+}
+```
+
+
+
+# Calculating RNA half-life based on smFISH data
+
+single.cell.progenitors.data is used, but results with single.cell.data are
+quite similar
+
+```{r}
 mean.properties.data <-
-  tibble(day = character(), gene = character(), prob.TX = as.numeric(),
-         mean.copy = as.numeric(), mean.nPol = as.numeric())
+  tibble(
+    day = character(), gene = character(), prob.TX = as.numeric(),
+    mean.copy = as.numeric(), mean.nPol = as.numeric()
+  )
 
 for (d in days) {
   for (g in genes) {
     mean.properties.data <-
       add_row(mean.properties.data,
-              day = d, gene = g,
-              prob.TX =
-                round(prob.TX.fn(single.cell.progenitors.data, d, g, ploidy),3),
-              mean.copy =
-                round(mean.copy.fn(single.cell.progenitors.data, d, g),3),
-              mean.nPol =
-                round(mean.nPol.fn(TX.mol, d, g),3))
+        day = d, gene = g,
+        prob.TX =
+          round(prob.TX.fn(single.cell.data, d, g, ploidy), 3),
+        mean.copy =
+          round(mean.copy.fn(single.cell.data, d, g), 3),
+        mean.nPol =
+          round(mean.nPol.fn(TX.mol, d, g), 3)
+      )
   }
 }
 mean.properties.data <- mean.properties.data %>% replace_na(list(mean.nPol = 0))
 
 mean.properties.data <-
   mean.properties.data %>%
-  mutate(vPol = vPol.chosen, gene.length = rep(genes.length,3),
-         ploidy = ploidy) %>%
+  mutate(
+    vPol = vPol.chosen, gene.length = rep(genes.length, 3),
+    ploidy = ploidy
+  ) %>%
   mutate(TX.rate = mean.nPol * vPol / gene.length) %>%
   mutate(deg.rate = prob.TX * TX.rate * ploidy / mean.copy) %>%
-  mutate(half.life = log(2)/deg.rate) #in min
-pander(head(mean.properties.data), style = "rmarkdown")
+  mutate(half.life = log(2) / deg.rate) %>% # in min
+  arrange(gene, day)
+
+pander(mean.properties.data, style = "rmarkdown")
 ```
   
   
-## 4.  
+# Effect of noise  
   
 ```{r}
 prob.TX.pairs.data <-
@@ -228,7 +361,9 @@ prob.TX.pairs.data <-
 pander(head(prob.TX.pairs.data), style = "rmarkdown")
 ```
   
-## TO BE FINISHED...  
+
+
+TO BE FINISHED...  
 
 for (d in days) {
   for (g in genes) {
@@ -239,27 +374,26 @@ for (d in days) {
   
 ```{r}
 prob.TX.pairs.fn <-
-  function(data, day.chosen, gene.chosen.1, gene.chosen.2,ploidy) {
-  # day.chosen and gene.schosen must be input as character (for example, "4"
-  # and "Olig2")
-  # ploidy must be input as numeric
-  day.gene.TX.subset <-
-    filter(data, day == day.chosen &
-                (channel == gene.chosen.1 | channel == gene.chosen.2))
-  dual.TX <-
-    day.gene.TX.subset %>%
-    select(channel, image, day, cell.id, TX.number) %>%
-    filter (TX.number != 0) %>%
-    group_by(day, image, cell.id) %>%
-    mutate(freq = n()) %>% 
-    ungroup() %>%
-    filter(freq == 2) %>%
-    select(-freq) %>%
-    spread(channel, TX.number) %>%
-    
-  return(nrow(dual.TX)/(nrow(day.gene.TX.subset)))
+  function(data, day.chosen, gene.chosen.1, gene.chosen.2, ploidy) {
+    # day.chosen and gene.schosen must be input as character (for example, "4"
+    # and "Olig2")
+    # ploidy must be input as numeric
+    day.gene.TX.subset <-
+      filter(data, day == day.chosen &
+        (channel == gene.chosen.1 | channel == gene.chosen.2))
+    dual.TX <-
+      day.gene.TX.subset %>%
+      select(channel, image, day, cell.id, TX.number) %>%
+      filter(TX.number != 0) %>%
+      group_by(day, image, cell.id) %>%
+      mutate(freq = n()) %>%
+      ungroup() %>%
+      filter(freq == 2) %>%
+      select(-freq) %>%
+      spread(channel, TX.number) %>%
+      return(nrow(dual.TX) / (nrow(day.gene.TX.subset)))
     # Here I do not make use of the ploidy concept...
-}
+  }
 ```
   
 two.alleles.data$channel <- as.factor(two.alleles.data$channel )
@@ -269,48 +403,11 @@ TX.probability.all[,6] <- TX.probability.all$TX.prob.pair /
   (TX.probability.all$TX.prob.oneC * TX.probability.all$TX.prob.otherC)
 colnames(TX.probability.all)[6] <- c("extrinsic.noise")
   
-## To measure the influence of extrinsic noise:  
-## THIS SHOULD BE DONE WITH A CONSTITUTIVE GENE TO COMPARE!!!  
+To measure the influence of extrinsic noise:  
+THIS SHOULD BE DONE WITH A CONSTITUTIVE GENE TO COMPARE!!!  
   
 ###########################################################################  
-  
-```{r}
-genes.pairwise <-
-  tibble(genes) %>%
-  rename(gene.1 = genes) %>%
-  mutate(gene.2 = gene.1) %>%
-  expand(gene.1, gene.2) %>%
-  filter(gene.1 < gene.2) # To get unique combinations
-```
-  
-```{r}
-setwd(parent)
 
-copy.box.plot(single.cell.progenitors.data)
-#copy.box.plot(single.cell.progenitors.data, darkTheme)
-concentration.box.plot(single.cell.progenitors.data)
-#concentration.box.plot(single.cell.progenitors.data, darkTheme)
-
-for (g in c(1,2,3)) {
-  copy.pairwise.scatter.plot(
-    single.cell.progenitors.data, 
-    genes.pairwise$gene.1[g], genes.pairwise$gene.2[g],
-    whiteTheme)
-#  copy.pairwise.scatter.plot(
-#    single.cell.progenitors.data, 
-#    genes.pairwise$gene.1[g], genes.pairwise$gene.2[g],
-#    darkTheme)
-  concentration.pairwise.scatter.plot(
-    single.cell.progenitors.data, 
-    genes.pairwise$gene.1[g], genes.pairwise$gene.2[g],
-    whiteTheme)
-#  concentration.pairwise.scatter.plot(
-#    single.cell.progenitors.data, 
-#    genes.pairwise$gene.1[g], genes.pairwise$gene.2[g],
-#    darkTheme)
-}
-```
-  
 source("26_cell_area.R")  
   
 ###########################################################################
@@ -341,30 +438,8 @@ source("26_barTXprob.R")
 
 source("26_barTXprobExtrinsic.R")
 
-###########################################################################
-###########################################################################
-
-
-nested <-
-  total %>%
-  group_by(day, image, cell.id, cell.area, channel, copy, density, TX.number) %>% nest() %>%
-  group_by(day, image, cell.id, cell.area, channel) %>% nest() %>%
-  group_by(day, image, cell.id, cell.area) %>% nest() %>%
-  group_by(day) %>% nest()
-
-myjson <- toJSON(nested, pretty = TRUE, auto_unbox = TRUE)
-
-write(myjson, "single-RNAs_TX-RNAs_cell.json")
-
-library(rjson)
-json_data <- fromJSON(file="single-RNAs_TX-RNAs_cell.json")
-
-
-###########################################################################
-###########################################################################
 
 source("26_boxTXmolecules.R")
-
 
 
 source("26_TX2alleles.R")
@@ -386,7 +461,7 @@ plots <- c(hist.spots.area,
 ###########################################################################
 ###########################################################################
 
-#Heterogeneity analysis
+Heterogeneity analysis
 
 var(spots.cell$copy.C1) / mean (spots.cell$copy.C1)
 
@@ -410,7 +485,7 @@ for (d in days) {
 ###########################################################################
 ###########################################################################
 
-#Save extracted data to file
+Save extracted data to file
 
 write.csv(spots.cell, "spots_cell.csv", row.names=FALSE)
 write.csv(spots.cell.2, "spots_cell2.csv", row.names=FALSE)
@@ -419,3 +494,5 @@ write.csv(spots.cell.pro, "spots_cell_pro.csv", row.names=FALSE)
 write.csv(spots.cell.2.pro, "spots_cell2_pro.csv", row.names=FALSE)
 
 write.csv(TX.molecules, "TX_molecules.csv", row.names=FALSE)
+
+
